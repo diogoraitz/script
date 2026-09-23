@@ -65,6 +65,9 @@ local Config = {
     AutoTrade = false,
     AntiAFK = false,
     BoostFPS = false,
+    AutoPlots = false,
+    AutoEatFruit = false,
+    AutoSellFruits = false,
 }
 
 --// Stats
@@ -234,6 +237,80 @@ task.spawn(function()
             end
         else
             task.wait(0.3)
+        end
+    end
+end)
+
+--// AUTO ORCHARD (plantar/colher/desbloquear parcelas + comer/vender fruta)
+-- Descoberto analisando a estrutura real do jogo: cada parcela em
+-- Orchard/Plots/PlotN tem um ProximityPrompt "OrchardPlotPrompt" que serve
+-- pras 3 ações (desbloquear, plantar, colher) dependendo do estado atual —
+-- é o mesmo prompt que o próprio jogo usa quando você aperta E. Disparando
+-- ele via fireproximityprompt fazemos exatamente o que o jogo já faria.
+local plotPrompts = {}
+local lastPlotScan = 0
+local plotIdx = 1
+
+local function scanPlots()
+    table.clear(plotPrompts)
+    local orchard = userTycoon:FindFirstChild("Orchard")
+    local plots = orchard and orchard:FindFirstChild("Plots")
+    if not plots then return end
+    for _, plot in ipairs(plots:GetChildren()) do
+        for _, obj in ipairs(plot:GetDescendants()) do
+            if obj:IsA("ProximityPrompt") then
+                table.insert(plotPrompts, obj)
+            end
+        end
+    end
+    plotIdx = 1
+end
+scanPlots()
+
+task.spawn(function()
+    while true do
+        if Config.AutoPlots then
+            if tick() - lastPlotScan > 5 then
+                pcall(scanPlots)
+                lastPlotScan = tick()
+            end
+            if #plotPrompts == 0 then
+                task.wait(1)
+            else
+                if plotIdx > #plotPrompts then plotIdx = 1 end
+                local prompt = plotPrompts[plotIdx]
+                plotIdx += 1
+                if prompt and prompt.Parent then
+                    pcall(function() fireproximityprompt(prompt) end)
+                end
+                task.wait(0.15) -- ritmo controlado, mesmo motivo do fruit/click
+            end
+        else
+            task.wait(0.3)
+        end
+    end
+end)
+
+--// AUTO EAT FRUIT / SELL FRUITS
+-- Remotes confirmados na estrutura do jogo (Tycoon/Remotes/EatFruit e
+-- .../SellFruits). Chamamos sem argumento; se o jogo exigir algum, a
+-- chamada simplesmente falha (protegida por pcall) sem quebrar o resto.
+task.spawn(function()
+    while true do
+        task.wait(3)
+        if Config.AutoEatFruit then
+            local remote = GetRemote("EatFruit")
+            if remote then pcall(function() remote:InvokeServer() end) end
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(5)
+        if Config.AutoSellFruits then
+            local remote = GetRemote("SellFruits")
+            if remote then pcall(function() remote:InvokeServer() end) end
         end
     end
 end)
@@ -602,6 +679,7 @@ local AutoRebirthToggle, AutoEvolveToggle, AutoAscendToggle
 local AutoPowerToggle, AutoClickToggle
 local AutoPhoneToggle, AutoOfflineToggle, AutoTimeToggle
 local AutoEarnerToggle, AutoLeversToggle, AntiAFKToggle
+local AutoPlotsToggle, AutoEatFruitToggle, AutoSellFruitsToggle
 
 local function SetAllFarm(v)
     Config.AutoBuy = v
@@ -618,6 +696,9 @@ local function SetAllFarm(v)
     Config.AutoEarner = v
     Config.AutoLevers = v
     Config.AntiAFK = v
+    Config.AutoPlots = v
+    Config.AutoEatFruit = v
+    Config.AutoSellFruits = v
 
     -- tenta sincronizar visualmente as toggles individuais (best-effort:
     -- se essa versão do Rayfield não suportar :Set, as flags acima já
@@ -627,16 +708,17 @@ local function SetAllFarm(v)
         AutoRebirthToggle, AutoEvolveToggle, AutoAscendToggle,
         AutoPowerToggle, AutoClickToggle, AutoPhoneToggle,
         AutoOfflineToggle, AutoTimeToggle, AutoEarnerToggle,
-        AutoLeversToggle, AntiAFKToggle,
+        AutoLeversToggle, AntiAFKToggle, AutoPlotsToggle,
+        AutoEatFruitToggle, AutoSellFruitsToggle,
     }) do
         if t then pcall(function() t:Set(v) end) end
     end
 
     Rayfield:Notify({
         Title = "Auto Farm",
-        Content = v and "Tudo ativado: comprando, upando stands, coletando frutas, rebirth/evolve/ascend, bônus e anti-AFK."
+        Content = v and "Tudo ativado: comprando, upando stands, colhendo/plantando frutas, vendendo, rebirth/evolve/ascend, bônus e anti-AFK."
             or "Tudo desativado.",
-        Duration = 5,
+        Duration = 6,
     })
 end
 
@@ -651,6 +733,9 @@ AutoRebirthToggle = MainTab:CreateToggle({ Name = "Auto Rebirth", CurrentValue =
 AutoEvolveToggle = MainTab:CreateToggle({ Name = "Auto Evolve (x10 speed)", CurrentValue = false, Callback = function(v) Config.AutoEvolve = v end })
 AutoAscendToggle = MainTab:CreateToggle({ Name = "Auto Ascend", CurrentValue = false, Callback = function(v) Config.AutoAscend = v end })
 AutoPowerToggle = MainTab:CreateToggle({ Name = "Auto Power Level", CurrentValue = false, Callback = function(v) Config.AutoPower = v end })
+AutoPlotsToggle = MainTab:CreateToggle({ Name = "Auto Plots (plantar/colher/desbloquear)", CurrentValue = false, Callback = function(v) Config.AutoPlots = v end })
+AutoEatFruitToggle = MainTab:CreateToggle({ Name = "Auto Eat Fruit", CurrentValue = false, Callback = function(v) Config.AutoEatFruit = v end })
+AutoSellFruitsToggle = MainTab:CreateToggle({ Name = "Auto Sell Fruits", CurrentValue = false, Callback = function(v) Config.AutoSellFruits = v end })
 
 --// Tab Bonus
 AutoPhoneToggle = BonusTab:CreateToggle({ Name = "Auto Phone Offer", CurrentValue = false, Callback = function(v) Config.AutoPhone = v end })
@@ -681,6 +766,46 @@ MiscTab:CreateButton({ Name = "Teleportar para Sewer Alien", Callback = function
 end })
 
 MiscTab:CreateButton({ Name = "Destruir GUI", Callback = function() Rayfield:Destroy() end })
+
+MiscTab:CreateButton({ Name = "Debug: Escanear Parcelas (Orchard)", Callback = function()
+    pcall(scanPlots)
+    Rayfield:Notify({
+        Title = "Debug Parcelas",
+        Content = string.format("ProximityPrompts encontrados em Orchard/Plots: %d", #plotPrompts),
+        Duration = 6,
+    })
+end })
+
+-- Testa uma vez só (não repete sozinho) pra descobrir se o remote aceita
+-- chamada sem argumento, sem arriscar gastar moeda repetidamente no caso
+-- de estar comprando algo errado por engano.
+MiscTab:CreateButton({ Name = "Debug: Testar BuyOrchardItems (1x, sem argumento)", Callback = function()
+    local remote = GetRemote("BuyOrchardItems")
+    if not remote then
+        Rayfield:Notify({ Title = "Debug", Content = "Remote BuyOrchardItems não encontrado.", Duration = 5 })
+        return
+    end
+    local ok, result = pcall(function() return remote:InvokeServer() end)
+    Rayfield:Notify({
+        Title = "Debug BuyOrchardItems",
+        Content = ok and ("Sucesso! Retornou: " .. tostring(result)) or ("Erro: " .. tostring(result)),
+        Duration = 10,
+    })
+end })
+
+MiscTab:CreateButton({ Name = "Debug: Testar UnlockOrchard (1x, sem argumento)", Callback = function()
+    local remote = GetRemote("UnlockOrchard")
+    if not remote then
+        Rayfield:Notify({ Title = "Debug", Content = "Remote UnlockOrchard não encontrado.", Duration = 5 })
+        return
+    end
+    local ok, result = pcall(function() return remote:InvokeServer() end)
+    Rayfield:Notify({
+        Title = "Debug UnlockOrchard",
+        Content = ok and ("Sucesso! Retornou: " .. tostring(result)) or ("Erro: " .. tostring(result)),
+        Duration = 10,
+    })
+end })
 
 MiscTab:CreateButton({ Name = "Debug: Escanear Frutas", Callback = function()
     pcall(scanFruits)
@@ -715,9 +840,9 @@ task.spawn(function()
             StatsPanel:Set({
                 Title = "Contadores",
                 Content = string.format(
-                    "Cash: %d\nCompras: %d | Upgrades: %d | Frutas: %d\nRebirths: %d\nÁrvores detectadas: %d",
+                    "Cash: %d\nCompras: %d | Upgrades: %d | Frutas: %d\nRebirths: %d\nFrutas detectadas: %d | Parcelas detectadas: %d",
                     math.floor(GetCash()), Stats.buys, Stats.upgrades, Stats.fruit,
-                    Stats.rebirths, #fruitCache
+                    Stats.rebirths, #fruitCache, #plotPrompts
                 ),
             })
         end)
