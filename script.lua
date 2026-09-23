@@ -80,7 +80,6 @@ local Stats = {
 local upgradeRemotes = {}
 local upgradeLevel = {}
 local lastUpgradeScan = 0
-local treeCache = {}
 local BuyLock = {}
 
 --// Funções Auxiliares
@@ -164,85 +163,67 @@ task.spawn(function()
     end
 end)
 
---// AUTO FRUIT COM CACHE DINÂMICA
-local function AddTree(obj)
-    if obj:IsA("Model") and obj.Name == "LemonTree" then
-        if not table.find(treeCache, obj) then
-            table.insert(treeCache, obj)
-        end
-    end
+--// AUTO FRUIT — detecção por objeto-fruta, não por container
+-- Não confia no nome da árvore/orchard (muda entre versões do jogo).
+-- Busca direto qualquer BasePart com "fruit" no nome que tenha um
+-- ClickDetector (direto ou dentro de um filho "ClickPart").
+local fruitCache = {}
+local lastFruitScan = 0
+
+local function findDetector(part)
+    local d = part:FindFirstChildOfClass("ClickDetector")
+    if d then return d end
+    local clickPart = part:FindFirstChild("ClickPart")
+    return clickPart and clickPart:FindFirstChildOfClass("ClickDetector")
 end
 
-local function RemoveTree(obj)
-    local idx = table.find(treeCache, obj)
-    if idx then table.remove(treeCache, idx) end
-end
-
-for _, v in ipairs(workspace:GetDescendants()) do AddTree(v) end
-workspace.DescendantAdded:Connect(AddTree)
-workspace.DescendantRemoving:Connect(RemoveTree)
-
--- Modo rápido: dispara os detectores sem mover o personagem.
--- Seguro pra rodar em paralelo (não mexe em hrp.CFrame), mas só funciona
--- se o servidor não validar a distância do jogador até a fruta.
-local function CollectFruitFast(tree)
-    for _, obj in ipairs(tree:GetDescendants()) do
-        if obj:IsA("BasePart") and obj.Name == "Fruit" then
-            local clickPart = obj:FindFirstChild("ClickPart")
-            local detector = clickPart and clickPart:FindFirstChildOfClass("ClickDetector")
+local function scanFruits()
+    table.clear(fruitCache)
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and obj.Name:lower():find("fruit") then
+            local detector = findDetector(obj)
             if detector then
-                pcall(function() fireclickdetector(detector) end)
-                Stats.fruit += 1
+                table.insert(fruitCache, { part = obj, detector = detector })
             end
         end
     end
 end
+scanFruits()
 
--- Modo clássico: teleporta até a árvore antes de clicar (funciona mesmo
--- se o servidor checar distância, mas é sequencial e mais lento).
-local function CollectFruitTeleport(tree)
+-- Modo rápido: dispara todos os detectores sem mover o personagem.
+-- Seguro pra rodar em paralelo. Só funciona se o servidor não validar distância.
+local function CollectFruitFast(entry)
+    pcall(function() fireclickdetector(entry.detector) end)
+    Stats.fruit += 1
+end
+
+-- Modo clássico: teleporta até cada fruta antes de clicar (mais lento,
+-- mas funciona mesmo se o servidor checar distância).
+local function CollectFruitTeleport(entry)
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-
-    for _, obj in ipairs(tree:GetDescendants()) do
-        if obj:IsA("BasePart") then obj.CanCollide = false end
-    end
-
-    local cf = tree:GetPivot()
-    pcall(function() hrp.CFrame = cf + Vector3.new(0, 5, 0) end)
-
-    for _, obj in ipairs(tree:GetDescendants()) do
-        if obj:IsA("BasePart") and obj.Name == "Fruit" then
-            obj.CanCollide = false
-            local clickPart = obj:FindFirstChild("ClickPart")
-            local detector = clickPart and clickPart:FindFirstChildOfClass("ClickDetector")
-            if detector then
-                task.wait(0.1)
-                pcall(function() fireclickdetector(detector) end)
-                Stats.fruit += 1
-            end
-        end
-    end
+    if not hrp or not entry.part.Parent then return end
+    pcall(function() hrp.CFrame = entry.part.CFrame + Vector3.new(0, 3, 0) end)
+    task.wait(0.1)
+    pcall(function() fireclickdetector(entry.detector) end)
+    Stats.fruit += 1
 end
 
 task.spawn(function()
     while true do
         task.wait(0.1)
         if Config.AutoFruit then
-            if Config.FastCollect then
-                -- paralelo: seguro porque cada coroutine só lê a própria árvore
-                for _, tree in ipairs(treeCache) do
-                    if not Config.AutoFruit then break end
-                    if tree and tree.Parent then
-                        task.spawn(function() pcall(CollectFruitFast, tree) end)
-                    end
-                end
-            else
-                for _, tree in ipairs(treeCache) do
-                    if not Config.AutoFruit then break end
-                    if tree and tree.Parent then
-                        pcall(CollectFruitTeleport, tree)
+            if tick() - lastFruitScan > 2 then
+                pcall(scanFruits)
+                lastFruitScan = tick()
+            end
+            for _, entry in ipairs(fruitCache) do
+                if not Config.AutoFruit then break end
+                if entry.part and entry.part.Parent and entry.detector and entry.detector.Parent then
+                    if Config.FastCollect then
+                        task.spawn(function() pcall(CollectFruitFast, entry) end)
+                    else
+                        pcall(CollectFruitTeleport, entry)
                     end
                 end
             end
@@ -636,102 +617,45 @@ end })
 
 MiscTab:CreateButton({ Name = "Destruir GUI", Callback = function() Rayfield:Destroy() end })
 
---// PAINEL DE STATUS
-task.spawn(function()
-    local parent = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    if not parent then
-        local ok, hui = pcall(function() return gethui() end)
-        parent = (ok and hui) or game:GetService("CoreGui")
+MiscTab:CreateButton({ Name = "Debug: Escanear Frutas", Callback = function()
+    pcall(scanFruits)
+    local withDetector = #fruitCache
+    local rawFruitParts = 0
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and obj.Name:lower():find("fruit") then
+            rawFruitParts += 1
+        end
     end
+    Rayfield:Notify({
+        Title = "Debug Frutas",
+        Content = string.format(
+            "Partes com 'fruit' no nome: %d\nCom ClickDetector utilizável: %d",
+            rawFruitParts, withDetector
+        ),
+        Duration = 8,
+    })
+end })
 
-    pcall(function()
-        local old = parent:FindFirstChild("UltimateStatusGui")
-        if old then old:Destroy() end
-    end)
+--// Tab Stats (dentro da própria janela, não sobrepõe nada)
+local StatsTab = Window:CreateTab("Stats", 4483362458)
+local StatsPanel = StatsTab:CreateParagraph({
+    Title = "Contadores",
+    Content = "Carregando...",
+})
 
-    local gui = Instance.new("ScreenGui")
-    gui.Name = "UltimateStatusGui"
-    gui.ResetOnSpawn = false
-    gui.IgnoreGuiInset = true
-    gui.DisplayOrder = 9999
-    gui.Parent = parent
-
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 220, 0, 200)
-    frame.Position = UDim2.new(0, 10, 0, 90)
-    frame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
-    frame.BackgroundTransparency = 0.1
-    frame.BorderSizePixel = 0
-    frame.Active = true
-    frame.Parent = gui
-    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
-
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, 0, 0, 24)
-    title.BackgroundColor3 = Color3.fromRGB(38, 40, 54)
-    title.BorderSizePixel = 0
-    title.Text = "ULTIMATE STATUS"
-    title.TextColor3 = Color3.fromRGB(120, 235, 140)
-    title.Font = Enum.Font.GothamBold
-    title.TextSize = 13
-    title.Parent = frame
-    Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
-
-    local body = Instance.new("TextLabel")
-    body.Size = UDim2.new(1, -12, 1, -30)
-    body.Position = UDim2.new(0, 8, 0, 28)
-    body.BackgroundTransparency = 1
-    body.TextXAlignment = Enum.TextXAlignment.Left
-    body.TextYAlignment = Enum.TextYAlignment.Top
-    body.RichText = true
-    body.TextColor3 = Color3.fromRGB(235, 235, 245)
-    body.Font = Enum.Font.Code
-    body.TextSize = 11
-    body.Parent = frame
-
-    -- Drag
-    local UIS = game:GetService("UserInputService")
-    local dragging, ds, sp
-    title.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-            dragging, ds, sp = true, i.Position, frame.Position
-            i.Changed:Connect(function()
-                if i.UserInputState == Enum.UserInputState.End then dragging = false end
-            end)
-        end
-    end)
-    UIS.InputChanged:Connect(function(i)
-        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
-            local d = i.Position - ds
-            frame.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y)
-        end
-    end)
-
-    local frames, fps, fpsT = 0, 0, tick()
-    RunService.RenderStepped:Connect(function()
-        frames = frames + 1
-        if tick() - fpsT >= 1 then fps, frames, fpsT = frames, 0, tick() end
-    end)
-
-    local function On(b) return b and "<font color='#7CFF7C'>ON</font>" or "<font color='#777'>off</font>" end
-
-    while gui.Parent do
-        local cash = GetCash()
-        body.Text = string.format(
-            "FPS: %d | Cash: %s\n"
-            .. "Buys: %d | Upgr: %d | Fruit: %d\n"
-            .. "Reb: %d | Evo: %d | Asc: %d\n"
-            .. "Power: %d | Drops: %d | Click: %d\n"
-            .. "Levers: %d | Vine: %d\n"
-            .. "Race: %d | Trade: %d | Phone: %d",
-            fps, cash,
-            Stats.buys, Stats.upgrades, Stats.fruit,
-            Stats.rebirths, Stats.evolves, Stats.ascends,
-            Stats.power, Stats.drops, Stats.clicks,
-            Stats.levers, Stats.vine,
-            Stats.races, Stats.trades, Stats.phone
-        )
-        task.wait(0.25)
+task.spawn(function()
+    while true do
+        task.wait(1)
+        pcall(function()
+            StatsPanel:Set({
+                Title = "Contadores",
+                Content = string.format(
+                    "Cash: %d\nCompras: %d | Upgrades: %d | Frutas: %d\nRebirths: %d\nÁrvores detectadas: %d",
+                    math.floor(GetCash()), Stats.buys, Stats.upgrades, Stats.fruit,
+                    Stats.rebirths, #fruitCache
+                ),
+            })
+        end)
     end
 end)
 
