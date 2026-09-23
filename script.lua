@@ -136,7 +136,7 @@ end
 
 task.spawn(function()
     while true do
-        task.wait(0.1)
+        task.wait(0.5)
         if Config.AutoBuy then pcall(BuyAllAffordable) end
     end
 end)
@@ -156,7 +156,7 @@ end
 
 task.spawn(function()
     while true do
-        task.wait(0.25)
+        task.wait() -- ~1 frame (poucos milésimos): upgrade de stand é barato, não precisa de rate-limit
         if Config.AutoUpgrade then
             if tick() - lastUpgradeScan > 3 then
                 RefreshUpgradeRemotes()
@@ -242,6 +242,8 @@ end)
 local RebirthCooldown = false
 local RebirthGainMultiple = 1.0
 local MinPotential = 1
+local RebirthMinInterval = 1800 -- 30 minutos entre rebirths, mesmo que já "valha a pena" antes disso
+local lastRebirthTime = 0
 
 local function ParseNumber(s)
     if not s then return nil end
@@ -285,11 +287,17 @@ task.spawn(function()
             local remote = GetRemote("Rebirth")
             local current, potential = GetInvestorInfo()
 
-            if remote and potential and potential >= MinPotential and potential >= current * RebirthGainMultiple then
+            local worthIt = remote and potential
+                and potential >= MinPotential
+                and potential >= current * RebirthGainMultiple
+            local intervalOk = (tick() - lastRebirthTime) >= RebirthMinInterval
+
+            if worthIt and intervalOk then
                 RebirthCooldown = true
                 task.spawn(function()
                     pcall(function() remote:InvokeServer() end)
                     Stats.rebirths += 1
+                    lastRebirthTime = tick()
                     task.wait(5)
                     RebirthCooldown = false
                 end)
@@ -363,19 +371,24 @@ local IncomeStreams = {
     "LemonStand", "LemonX",
 }
 
+-- Antes disparava as 8 streams em paralelo a cada 100ms (até 80 chamadas/s).
+-- Agora cicla uma stream por vez, ritmo fixo — mesmo princípio da correção
+-- das frutas, pra não estourar o rate-limit do servidor.
 task.spawn(function()
+    local idx = 1
     while true do
-        task.wait(0.1)
         if Config.AutoClick then
             local remote = GetRemote("WakeIncomeStream")
             if remote then
-                for _, stream in ipairs(IncomeStreams) do
-                    task.spawn(function()
-                        pcall(function() remote:InvokeServer(stream) end)
-                        Stats.clicks += 1
-                    end)
-                end
+                if idx > #IncomeStreams then idx = 1 end
+                local stream = IncomeStreams[idx]
+                idx += 1
+                pcall(function() remote:InvokeServer(stream) end)
+                Stats.clicks += 1
             end
+            task.wait(0.15)
+        else
+            task.wait(0.3)
         end
     end
 end)
@@ -383,7 +396,7 @@ end)
 --// AUTO PHONE OFFER
 task.spawn(function()
     while true do
-        task.wait(0.5)
+        task.wait(2)
         if Config.AutoPhone then
             local remote = GetRemote("PhoneOffer")
             if remote then
@@ -583,10 +596,12 @@ local MainTab = Window:CreateTab("Farm", 4483362458)
 local BonusTab = Window:CreateTab("Bonus", 4483362458)
 local MiscTab = Window:CreateTab("Misc", 4483362458)
 
---// Botão único: liga tudo de uma vez (Buy, Upgrade, Fruit, Rebirth, Evolve, Ascend, Power, Click)
+--// Botão único: liga tudo de uma vez (farm completo, sem precisar tocar em mais nada)
 local AutoBuyToggle, AutoUpgradeToggle, AutoFruitToggle
 local AutoRebirthToggle, AutoEvolveToggle, AutoAscendToggle
 local AutoPowerToggle, AutoClickToggle
+local AutoPhoneToggle, AutoOfflineToggle, AutoTimeToggle
+local AutoEarnerToggle, AutoLeversToggle, AntiAFKToggle
 
 local function SetAllFarm(v)
     Config.AutoBuy = v
@@ -597,6 +612,12 @@ local function SetAllFarm(v)
     Config.AutoAscend = v
     Config.AutoPower = v
     Config.AutoClick = v
+    Config.AutoPhone = v
+    Config.AutoOffline = v
+    Config.AutoTime = v
+    Config.AutoEarner = v
+    Config.AutoLevers = v
+    Config.AntiAFK = v
 
     -- tenta sincronizar visualmente as toggles individuais (best-effort:
     -- se essa versão do Rayfield não suportar :Set, as flags acima já
@@ -604,14 +625,16 @@ local function SetAllFarm(v)
     for _, t in ipairs({
         AutoBuyToggle, AutoUpgradeToggle, AutoFruitToggle,
         AutoRebirthToggle, AutoEvolveToggle, AutoAscendToggle,
-        AutoPowerToggle, AutoClickToggle,
+        AutoPowerToggle, AutoClickToggle, AutoPhoneToggle,
+        AutoOfflineToggle, AutoTimeToggle, AutoEarnerToggle,
+        AutoLeversToggle, AntiAFKToggle,
     }) do
         if t then pcall(function() t:Set(v) end) end
     end
 
     Rayfield:Notify({
         Title = "Auto Farm",
-        Content = v and "Tudo ativado: comprando, upando stands, coletando frutas, rebirth/evolve/ascend automáticos."
+        Content = v and "Tudo ativado: comprando, upando stands, coletando frutas, rebirth/evolve/ascend, bônus e anti-AFK."
             or "Tudo desativado.",
         Duration = 5,
     })
@@ -630,16 +653,16 @@ AutoAscendToggle = MainTab:CreateToggle({ Name = "Auto Ascend", CurrentValue = f
 AutoPowerToggle = MainTab:CreateToggle({ Name = "Auto Power Level", CurrentValue = false, Callback = function(v) Config.AutoPower = v end })
 
 --// Tab Bonus
-BonusTab:CreateToggle({ Name = "Auto Phone Offer", CurrentValue = false, Callback = function(v) Config.AutoPhone = v end })
-BonusTab:CreateToggle({ Name = "Auto Double Offline Cash", CurrentValue = false, Callback = function(v) Config.AutoOffline = v end })
-BonusTab:CreateToggle({ Name = "Auto Time Cash", CurrentValue = false, Callback = function(v) Config.AutoTime = v end })
-BonusTab:CreateToggle({ Name = "Auto Earner Boost", CurrentValue = false, Callback = function(v) Config.AutoEarner = v end })
+AutoPhoneToggle = BonusTab:CreateToggle({ Name = "Auto Phone Offer", CurrentValue = false, Callback = function(v) Config.AutoPhone = v end })
+AutoOfflineToggle = BonusTab:CreateToggle({ Name = "Auto Double Offline Cash", CurrentValue = false, Callback = function(v) Config.AutoOffline = v end })
+AutoTimeToggle = BonusTab:CreateToggle({ Name = "Auto Time Cash", CurrentValue = false, Callback = function(v) Config.AutoTime = v end })
+AutoEarnerToggle = BonusTab:CreateToggle({ Name = "Auto Earner Boost", CurrentValue = false, Callback = function(v) Config.AutoEarner = v end })
 BonusTab:CreateToggle({ Name = "Auto Minigame Race", CurrentValue = false, Callback = function(v) Config.AutoRace = v end })
 BonusTab:CreateToggle({ Name = "Auto Minigame Trade", CurrentValue = false, Callback = function(v) Config.AutoTrade = v end })
-BonusTab:CreateToggle({ Name = "Auto Levers + Vine", CurrentValue = false, Callback = function(v) Config.AutoLevers = v end })
+AutoLeversToggle = BonusTab:CreateToggle({ Name = "Auto Levers + Vine", CurrentValue = false, Callback = function(v) Config.AutoLevers = v end })
 
 --// Tab Misc
-MiscTab:CreateToggle({ Name = "Anti-AFK", CurrentValue = false, Callback = function(v) Config.AntiAFK = v end })
+AntiAFKToggle = MiscTab:CreateToggle({ Name = "Anti-AFK", CurrentValue = false, Callback = function(v) Config.AntiAFK = v end })
 MiscTab:CreateToggle({ Name = "Boost FPS", CurrentValue = false, Callback = function(v) Config.BoostFPS = v; if v then EnableFPSBoost() else DisableFPSBoost() end end })
 
 MiscTab:CreateButton({ Name = "Vine Harvest (Manual)", Callback = function()
