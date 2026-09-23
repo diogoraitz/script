@@ -65,7 +65,6 @@ local Config = {
     AutoTrade = false,
     AntiAFK = false,
     BoostFPS = false,
-    FastCollect = false, -- coleta frutas sem teleportar (mais rápido, mas só funciona se o servidor não checar distância)
 }
 
 --// Stats
@@ -81,6 +80,23 @@ local upgradeRemotes = {}
 local upgradeLevel = {}
 local lastUpgradeScan = 0
 local BuyLock = {}
+
+--// Limitador de chamadas simultâneas ao servidor.
+-- Disparar dezenas de InvokeServer em paralelo estoura o rate-limit do
+-- servidor, que aí passa a ignorar/atrasar TODAS as chamadas (é isso que
+-- causava "compra para de funcionar" depois de um tempo). Isso trava um
+-- teto de chamadas simultâneas em voo.
+local activeRemoteCalls = 0
+local MAX_CONCURRENT_CALLS = 6
+
+local function limitedSpawn(fn)
+    if activeRemoteCalls >= MAX_CONCURRENT_CALLS then return end
+    activeRemoteCalls += 1
+    task.spawn(function()
+        pcall(fn)
+        activeRemoteCalls -= 1
+    end)
+end
 
 --// Funções Auxiliares
 local function GetRemote(name)
@@ -107,12 +123,11 @@ local function BuyAllAffordable()
                 local purchase = obj:FindFirstChild("Purchase")
                 if purchase and purchase:IsA("RemoteFunction") and not BuyLock[purchase] then
                     BuyLock[purchase] = true
-                    task.spawn(function()
+                    limitedSpawn(function()
                         pcall(function() purchase:InvokeServer() end)
                         Stats.buys += 1
-                        task.wait(0.5)
-                        BuyLock[purchase] = nil
                     end)
+                    task.delay(0.5, function() BuyLock[purchase] = nil end)
                 end
             end
         end
@@ -166,9 +181,12 @@ end)
 --// AUTO FRUIT — detecção por objeto-fruta, não por container
 -- Não confia no nome da árvore/orchard (muda entre versões do jogo).
 -- Busca direto qualquer BasePart com "fruit" no nome que tenha um
--- ClickDetector (direto ou dentro de um filho "ClickPart").
+-- ClickDetector (direto ou dentro de um filho "ClickPart"), procurando
+-- só dentro do SEU tycoon (não o workspace inteiro — evita clicar em
+-- fruta de outro jogador e gerar tráfego desnecessário no servidor).
 local fruitCache = {}
 local lastFruitScan = 0
+local fruitIdx = 1
 
 local function findDetector(part)
     local d = part:FindFirstChildOfClass("ClickDetector")
@@ -179,7 +197,7 @@ end
 
 local function scanFruits()
     table.clear(fruitCache)
-    for _, obj in ipairs(workspace:GetDescendants()) do
+    for _, obj in ipairs(userTycoon:GetDescendants()) do
         if obj:IsA("BasePart") and obj.Name:lower():find("fruit") then
             local detector = findDetector(obj)
             if detector then
@@ -187,46 +205,35 @@ local function scanFruits()
             end
         end
     end
+    fruitIdx = 1
 end
 scanFruits()
 
--- Modo rápido: dispara todos os detectores sem mover o personagem.
--- Seguro pra rodar em paralelo. Só funciona se o servidor não validar distância.
-local function CollectFruitFast(entry)
-    pcall(function() fireclickdetector(entry.detector) end)
-    Stats.fruit += 1
-end
-
--- Modo clássico: teleporta até cada fruta antes de clicar (mais lento,
--- mas funciona mesmo se o servidor checar distância).
-local function CollectFruitTeleport(entry)
-    local char = LocalPlayer.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp or not entry.part.Parent then return end
-    pcall(function() hrp.CFrame = entry.part.CFrame + Vector3.new(0, 3, 0) end)
-    task.wait(0.1)
-    pcall(function() fireclickdetector(entry.detector) end)
-    Stats.fruit += 1
-end
-
+-- Coleta UMA fruta por vez, num ritmo fixo (não em rajada). Isso é
+-- proposital: disparar dezenas de cliques no mesmo instante é o que
+-- estourava o rate-limit do servidor e derrubava Buy/Upgrade junto.
 task.spawn(function()
     while true do
-        task.wait(0.1)
         if Config.AutoFruit then
-            if tick() - lastFruitScan > 2 then
+            if tick() - lastFruitScan > 3 then
                 pcall(scanFruits)
                 lastFruitScan = tick()
             end
-            for _, entry in ipairs(fruitCache) do
-                if not Config.AutoFruit then break end
-                if entry.part and entry.part.Parent and entry.detector and entry.detector.Parent then
-                    if Config.FastCollect then
-                        task.spawn(function() pcall(CollectFruitFast, entry) end)
-                    else
-                        pcall(CollectFruitTeleport, entry)
-                    end
+
+            if #fruitCache == 0 then
+                task.wait(1)
+            else
+                if fruitIdx > #fruitCache then fruitIdx = 1 end
+                local entry = fruitCache[fruitIdx]
+                fruitIdx += 1
+                if entry and entry.part and entry.part.Parent and entry.detector and entry.detector.Parent then
+                    pcall(function() fireclickdetector(entry.detector) end)
+                    Stats.fruit += 1
                 end
+                task.wait(0.08) -- ~12 frutas/segundo, ritmo seguro
             end
+        else
+            task.wait(0.3)
         end
     end
 end)
@@ -576,16 +583,51 @@ local MainTab = Window:CreateTab("Farm", 4483362458)
 local BonusTab = Window:CreateTab("Bonus", 4483362458)
 local MiscTab = Window:CreateTab("Misc", 4483362458)
 
---// Tab Farm
-MainTab:CreateToggle({ Name = "Auto Buy", CurrentValue = false, Callback = function(v) Config.AutoBuy = v end })
-MainTab:CreateToggle({ Name = "Auto Upgrade Stands", CurrentValue = false, Callback = function(v) Config.AutoUpgrade = v end })
-MainTab:CreateToggle({ Name = "Auto Fruit", CurrentValue = false, Callback = function(v) Config.AutoFruit = v end })
-MainTab:CreateToggle({ Name = "Fruit: Modo Rápido (sem teleporte)", CurrentValue = false, Callback = function(v) Config.FastCollect = v end })
-MainTab:CreateToggle({ Name = "Auto Click Income", CurrentValue = false, Callback = function(v) Config.AutoClick = v end })
-MainTab:CreateToggle({ Name = "Auto Rebirth", CurrentValue = false, Callback = function(v) Config.AutoRebirth = v end })
-MainTab:CreateToggle({ Name = "Auto Evolve (x10 speed)", CurrentValue = false, Callback = function(v) Config.AutoEvolve = v end })
-MainTab:CreateToggle({ Name = "Auto Ascend", CurrentValue = false, Callback = function(v) Config.AutoAscend = v end })
-MainTab:CreateToggle({ Name = "Auto Power Level", CurrentValue = false, Callback = function(v) Config.AutoPower = v end })
+--// Botão único: liga tudo de uma vez (Buy, Upgrade, Fruit, Rebirth, Evolve, Ascend, Power, Click)
+local AutoBuyToggle, AutoUpgradeToggle, AutoFruitToggle
+local AutoRebirthToggle, AutoEvolveToggle, AutoAscendToggle
+local AutoPowerToggle, AutoClickToggle
+
+local function SetAllFarm(v)
+    Config.AutoBuy = v
+    Config.AutoUpgrade = v
+    Config.AutoFruit = v
+    Config.AutoRebirth = v
+    Config.AutoEvolve = v
+    Config.AutoAscend = v
+    Config.AutoPower = v
+    Config.AutoClick = v
+
+    -- tenta sincronizar visualmente as toggles individuais (best-effort:
+    -- se essa versão do Rayfield não suportar :Set, as flags acima já
+    -- garantem que o farm funciona mesmo assim)
+    for _, t in ipairs({
+        AutoBuyToggle, AutoUpgradeToggle, AutoFruitToggle,
+        AutoRebirthToggle, AutoEvolveToggle, AutoAscendToggle,
+        AutoPowerToggle, AutoClickToggle,
+    }) do
+        if t then pcall(function() t:Set(v) end) end
+    end
+
+    Rayfield:Notify({
+        Title = "Auto Farm",
+        Content = v and "Tudo ativado: comprando, upando stands, coletando frutas, rebirth/evolve/ascend automáticos."
+            or "Tudo desativado.",
+        Duration = 5,
+    })
+end
+
+MainTab:CreateToggle({ Name = "AUTO FARM COMPLETO (ativa tudo)", CurrentValue = false, Callback = SetAllFarm })
+
+--// Tab Farm (controle individual, opcional)
+AutoBuyToggle = MainTab:CreateToggle({ Name = "Auto Buy", CurrentValue = false, Callback = function(v) Config.AutoBuy = v end })
+AutoUpgradeToggle = MainTab:CreateToggle({ Name = "Auto Upgrade Stands", CurrentValue = false, Callback = function(v) Config.AutoUpgrade = v end })
+AutoFruitToggle = MainTab:CreateToggle({ Name = "Auto Fruit", CurrentValue = false, Callback = function(v) Config.AutoFruit = v end })
+AutoClickToggle = MainTab:CreateToggle({ Name = "Auto Click Income", CurrentValue = false, Callback = function(v) Config.AutoClick = v end })
+AutoRebirthToggle = MainTab:CreateToggle({ Name = "Auto Rebirth", CurrentValue = false, Callback = function(v) Config.AutoRebirth = v end })
+AutoEvolveToggle = MainTab:CreateToggle({ Name = "Auto Evolve (x10 speed)", CurrentValue = false, Callback = function(v) Config.AutoEvolve = v end })
+AutoAscendToggle = MainTab:CreateToggle({ Name = "Auto Ascend", CurrentValue = false, Callback = function(v) Config.AutoAscend = v end })
+AutoPowerToggle = MainTab:CreateToggle({ Name = "Auto Power Level", CurrentValue = false, Callback = function(v) Config.AutoPower = v end })
 
 --// Tab Bonus
 BonusTab:CreateToggle({ Name = "Auto Phone Offer", CurrentValue = false, Callback = function(v) Config.AutoPhone = v end })
